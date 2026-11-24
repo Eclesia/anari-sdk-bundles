@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# Bundle part "photon" : the Photon device (Kokkos path tracer, CUDA backend).
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=photon
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# Photon branch or tag, and the ANARI SDK branch or tag it is built with (the one of the other
+# parts), empty for the default branches. Photon builds its own libanari, not shipped.
+ARG PHOTON_REF=
+ARG ANARI_SDK_REF=
+COPY scripts/build-photon.sh /scripts/
+RUN bash /scripts/build-photon.sh fetch "${PHOTON_REF}" "${ANARI_SDK_REF}"
+
+# Kokkos GPU architecture : PASCAL61, VOLTA70, TURING75, AMPERE80, AMPERE86, ADA89, HOPPER90...
+# The kernels embed the PTX of this architecture, compiled by the driver for newer GPUs.
+ARG PHOTON_KOKKOS_ARCH=PASCAL61
+RUN --mount=type=cache,id=anari-bundle-photon,target=/src/photon/build \
+    bash /scripts/build-photon.sh build "${JOBS}" "${PHOTON_KOKKOS_ARCH}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-photon.sh bundle

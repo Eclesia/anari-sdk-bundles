@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Bundle part "webgpu" : the WebGPU device (anari-webgpu) with Google's Dawn and Slang.
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=webgpu
+
+# Dawn's binary release is built with GCC 14 : linked with GCC 14 too, whose libstdc++_nonshared
+# provides the newer libstdc++ symbols on top of the system libstdc++ of Rocky Linux 8
+RUN dnf -y install gcc-toolset-14-gcc-c++ && dnf clean all
+ENV PATH=/opt/rh/gcc-toolset-14/root/usr/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64:/opt/rh/gcc-toolset-14/root/usr/lib:${LD_LIBRARY_PATH} \
+    CC=/opt/rh/gcc-toolset-14/root/usr/bin/gcc \
+    CXX=/opt/rh/gcc-toolset-14/root/usr/bin/g++
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# libanari to link with, not shipped : the bundle uses the one of the sdk part
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-core.sh /scripts/
+RUN bash /scripts/build-anari-core.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-webgpu-anari-core,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-core.sh build "${JOBS}"
+
+# anari-webgpu branch or tag, and Dawn release tag (for example v20261112.214115), empty for the latest
+ARG ANARI_WEBGPU_REF=
+ARG DAWN_RELEASE=
+COPY scripts/build-webgpu.sh /scripts/
+RUN bash /scripts/build-webgpu.sh fetch "${ANARI_WEBGPU_REF}" "${DAWN_RELEASE}"
+RUN --mount=type=cache,id=anari-bundle-webgpu,target=/src/anari-webgpu/build \
+    bash /scripts/build-webgpu.sh build "${JOBS}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-webgpu.sh bundle

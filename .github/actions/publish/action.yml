@@ -1,0 +1,83 @@
+name: Publish a bundle
+description: >
+  Creates the tag <os>/<version> on the commit the workflow runs on and a release holding the
+  bundle archive, then adds the line "<os>;<version>;<download url>" to releases.log on the
+  default branch. Needs a checkout of the repository and the contents: write permission.
+inputs:
+  os:
+    description: Operating system (linux, windows, macos)
+    required: true
+  version:
+    description: Version of the bundle
+    required: true
+  archive:
+    description: Path of the bundle archive
+    required: true
+  manifest:
+    description: Path of the bundle MANIFEST.txt, copied in the release notes
+    required: true
+outputs:
+  url:
+    description: Download URL of the archive
+    value: ${{ steps.release.outputs.url }}
+runs:
+  using: composite
+  steps:
+    - id: release
+      name: Create the tag and the release
+      shell: bash
+      env:
+        OS: ${{ inputs.os }}
+        VERSION: ${{ inputs.version }}
+        ARCHIVE: ${{ inputs.archive }}
+        MANIFEST: ${{ inputs.manifest }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        tag="${OS}/${VERSION}"
+        {
+          echo "ANARI native bundle for ${OS}, version ${VERSION}, built from ${GITHUB_SHA}."
+          echo
+          echo '```'
+          cat "${MANIFEST}"
+          echo '```'
+        } > "${RUNNER_TEMP}/notes.md"
+        gh release create "${tag}" "${ARCHIVE}" \
+          --repo "${GITHUB_REPOSITORY}" \
+          --target "${GITHUB_SHA}" \
+          --title "${OS} ${VERSION}" \
+          --notes-file "${RUNNER_TEMP}/notes.md"
+        name=$(basename "${ARCHIVE}")
+        url=$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
+              --jq ".assets[] | select(.name == \"${name}\") | .url")
+        if [ -z "${url}" ]; then
+          echo "::error::No asset ${name} in release ${tag}"
+          exit 1
+        fi
+        echo "Download URL : ${url}"
+        echo "url=${url}" >> "${GITHUB_OUTPUT}"
+
+    - name: Add the release to releases.log
+      shell: bash
+      env:
+        OS: ${{ inputs.os }}
+        VERSION: ${{ inputs.version }}
+        URL: ${{ steps.release.outputs.url }}
+        BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        # the workflows of the other operating systems may push at the same time : start again
+        # from the latest commit of the branch when the push is refused
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        for attempt in 1 2 3 4 5; do
+          git fetch --depth 1 origin "${BRANCH}"
+          git checkout --force -B "${BRANCH}" FETCH_HEAD
+          echo "${OS};${VERSION};${URL}" >> releases.log
+          git add releases.log
+          git commit --quiet -m "Release ${OS}/${VERSION}"
+          if git push origin "HEAD:${BRANCH}"; then
+            exit 0
+          fi
+          sleep $((attempt * 10))
+        done
+        echo "::error::Could not push releases.log to ${BRANCH}"
+        exit 1

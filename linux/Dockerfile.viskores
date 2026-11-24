@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+# Bundle part "viskores" : the Viskores device (ray tracing with the Viskores worklets, OpenMP).
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=viskores
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# libanari to link with, not shipped : the bundle uses the one of the sdk part
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-core.sh /scripts/
+RUN bash /scripts/build-anari-core.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-viskores-anari-core,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-core.sh build "${JOBS}"
+
+ARG VISKORES_REF=
+COPY scripts/build-viskores.sh /scripts/
+RUN bash /scripts/build-viskores.sh fetch "${VISKORES_REF}"
+
+# CUDA architectures to add the CUDA backend, for example "61" (Pascal), empty for the CPU backend
+# alone (OpenMP). The CUDA backend is chosen at runtime when an NVIDIA GPU is found.
+ARG VISKORES_CUDA_ARCHS=
+RUN --mount=type=cache,id=anari-bundle-viskores,target=/src/viskores/build \
+    bash /scripts/build-viskores.sh build "${JOBS}" "${VISKORES_CUDA_ARCHS}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-viskores.sh bundle

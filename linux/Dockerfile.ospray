@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1
+# Bundle part "ospray" : the OSPRay device (anari-ospray) with the OSPRay binary release.
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=ospray
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# libanari to link with, not shipped : the bundle uses the one of the sdk part
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-core.sh /scripts/
+RUN bash /scripts/build-anari-core.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-ospray-anari-core,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-core.sh build "${JOBS}"
+
+ARG OSPRAY_VERSION=3.2.0
+ARG ANARI_OSPRAY_REF=
+COPY scripts/build-ospray.sh /scripts/
+RUN bash /scripts/build-ospray.sh fetch "${OSPRAY_VERSION}" "${ANARI_OSPRAY_REF}"
+RUN --mount=type=cache,id=anari-bundle-ospray,target=/src/anari-ospray/build \
+    bash /scripts/build-ospray.sh build "${JOBS}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-ospray.sh bundle

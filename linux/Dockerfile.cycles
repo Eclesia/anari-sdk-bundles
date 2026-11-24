@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Bundle part "cycles" : the Blender Cycles device (anari-cycles) with Blender's precompiled libraries.
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=cycles
+
+# Parallel compile jobs, empty for all cores. The CUDA kernels need about 4 GB per job.
+ARG JOBS=
+
+# libanari to link with, not shipped : the bundle uses the one of the sdk part
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-core.sh /scripts/
+RUN bash /scripts/build-anari-core.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-cycles-anari-core,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-core.sh build "${JOBS}"
+
+ARG ANARI_CYCLES_REF=
+COPY scripts/build-cycles.sh /scripts/
+RUN bash /scripts/build-cycles.sh fetch "${ANARI_CYCLES_REF}"
+RUN bash /scripts/build-cycles.sh libraries
+# ON to build the Cycles CUDA/OptiX kernels (long), OFF for CPU only
+ARG CYCLES_OPTIX=ON
+# Cycles CUDA architectures : compute_XX is PTX compiled by the driver on first use, sm_XX is native
+ARG CYCLES_CUDA_ARCHS=compute_75
+RUN --mount=type=cache,id=anari-bundle-cycles,target=/src/anari-cycles/build \
+    bash /scripts/build-cycles.sh build "${JOBS}" "${CYCLES_OPTIX}" "${CYCLES_CUDA_ARCHS}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-cycles.sh bundle

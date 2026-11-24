@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Bundle part "barney" : the Barney device (NVIDIA's multi-GPU path tracer, OptiX backend).
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=barney
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# libanari to link with, not shipped : the bundle uses the one of the sdk part
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-core.sh /scripts/
+RUN bash /scripts/build-anari-core.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-barney-anari-core,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-core.sh build "${JOBS}"
+
+ARG BARNEY_REF=
+COPY scripts/build-barney.sh /scripts/
+RUN bash /scripts/build-barney.sh fetch "${BARNEY_REF}"
+
+# CUDA architectures of the kernels ("61" : Pascal, its PTX is compiled by the driver for newer
+# GPUs), and the Embree CPU backend for machines without NVIDIA GPU
+ARG BARNEY_CUDA_ARCHS=61
+ARG BARNEY_BACKEND_CPU=OFF
+RUN --mount=type=cache,id=anari-bundle-barney,target=/src/barney/build \
+    bash /scripts/build-barney.sh build "${JOBS}" "${BARNEY_CUDA_ARCHS}" "${BARNEY_BACKEND_CPU}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-barney.sh bundle

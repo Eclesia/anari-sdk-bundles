@@ -1,0 +1,193 @@
+# Builds the ANARI native bundle for Linux x86_64 and publishes it as a GitHub release.
+#
+# Started by hand (Actions tab, "Release Linux", "Run workflow") with a version string. Creates the
+# tag linux/<version> on the commit the workflow runs on, a release holding
+# anari-linux-x86_64-<version>.tar.gz, and adds "linux;<version>;<download url>" to releases.log.
+#
+# One job per bundle part, each building the part's container image (linux/Dockerfile.*), then one
+# job merging the parts (linux/assemble-bundle.sh). A failed part can be rebuilt with
+# "Re-run failed jobs" : the release is created once every job succeeded.
+name: Release Linux
+run-name: Release linux/${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, in the tag linux/<version> and the archive name (letters, digits, '.', '_', '+', '-')
+        required: true
+        type: string
+      build-args:
+        description: Optional container build arguments, space separated NAME=value (for example ANARI_SDK_REF=v0.15.0 CYCLES_OPTIX=ON). Defaults are JOBS=3 CYCLES_OPTIX=OFF. See linux/README.md.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-linux-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  OS: linux
+  VERSION: ${{ inputs.version }}
+  # bundle parts, in merge order : see linux/README.md
+  PARTS: sdk ospray visrtx cycles halogen webgpu photon barney viskores
+  NAME: anari-linux-x86_64-${{ inputs.version }}
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      parts: ${{ steps.parts.outputs.parts }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/check-tag
+        with:
+          os: ${{ env.OS }}
+          version: ${{ inputs.version }}
+
+      - name: List the parts
+        id: parts
+        run: |
+          read -ra parts <<< "${PARTS}"
+          echo "parts=$(printf '%s\n' "${parts[@]}" | jq -R . | jq -cs .)" >> "${GITHUB_OUTPUT}"
+
+  part:
+    name: Part ${{ matrix.part }}
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.check.outputs.parts) }}
+    env:
+      PART: ${{ matrix.part }}
+      TOOLCHAIN: anari-bundle-toolchain
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+                      /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/boost \
+                      /usr/local/share/powershell /usr/local/share/chromium /opt/microsoft /opt/google
+          docker system prune -af > /dev/null
+          df -h /
+
+      - name: Build arguments
+        env:
+          USER_ARGS: ${{ inputs.build-args }}
+        run: |
+          # Defaults first, the arguments given by the user come later and win.
+          # JOBS=3 : the runners have 4 cores and 16 GB of memory, CUDA compile jobs need up to 4 GB.
+          # CYCLES_OPTIX=OFF : the Cycles CUDA/OptiX kernels take hours to compile on 4 cores.
+          args="--build-arg TOOLCHAIN_IMAGE=${TOOLCHAIN} --build-arg JOBS=3 --build-arg CYCLES_OPTIX=OFF"
+          read -ra user <<< "${USER_ARGS}"
+          for a in "${user[@]}"; do
+            if ! [[ "${a}" =~ ^[A-Z0-9_]+=[^[:space:]]*$ ]]; then
+              echo "::error::Invalid build argument '${a}', expected NAME=value"
+              exit 1
+            fi
+            args="${args} --build-arg ${a}"
+          done
+          echo "Build arguments : ${args}"
+          echo "DOCKER_ARGS=${args}" >> "${GITHUB_ENV}"
+
+      - name: Build the toolchain image
+        if: matrix.part != 'halogen'
+        run: |
+          read -ra args <<< "${DOCKER_ARGS}"
+          docker build --progress=plain -t "${TOOLCHAIN}" -f linux/Dockerfile.toolchain "${args[@]}" linux
+
+      - name: Build the part image
+        run: |
+          read -ra args <<< "${DOCKER_ARGS}"
+          docker build --progress=plain -t "anari-bundle-${PART}" -f "linux/Dockerfile.${PART}" "${args[@]}" linux
+
+      - name: Copy the part from the image
+        run: |
+          # a tar archive keeps the symbolic links (soname links), which artifacts do not
+          container=$(docker create "anari-bundle-${PART}")
+          docker cp "${container}:/bundle/${PART}" - > "part-${PART}.tar"
+          docker rm -f "${container}" > /dev/null
+          tar -tf "part-${PART}.tar" "${PART}/MANIFEST.txt" > /dev/null
+          ls -lh "part-${PART}.tar"
+          {
+            echo "### Part ${PART}"
+            echo '```'
+            tar -xOf "part-${PART}.tar" "${PART}/MANIFEST.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.part }}
+          path: part-${{ matrix.part }}.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  bundle:
+    name: Bundle
+    needs: part
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: parts
+          merge-multiple: true
+
+      - name: Assemble the bundle
+        run: |
+          read -ra parts <<< "${PARTS}"
+          mkdir -p dist/parts
+          for part in "${parts[@]}"; do
+            tar -xf "parts/part-${part}.tar" -C dist/parts
+          done
+          BUNDLE_VERSION="${VERSION}" linux/assemble-bundle.sh dist "${NAME}" "${parts[@]}"
+          mkdir -p bundle
+          mv "dist/${NAME}.tar.gz" bundle/
+          cp "dist/${NAME}/MANIFEST.txt" bundle/
+          {
+            echo "### ${NAME}"
+            echo '```'
+            cat "dist/${NAME}/MANIFEST.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: bundle/
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: ${{ runner.temp }}/bundle
+
+      - uses: ./.github/actions/publish
+        with:
+          os: ${{ env.OS }}
+          version: ${{ inputs.version }}
+          archive: ${{ runner.temp }}/bundle/${{ env.NAME }}.tar.gz
+          manifest: ${{ runner.temp }}/bundle/MANIFEST.txt

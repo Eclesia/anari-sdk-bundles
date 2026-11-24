@@ -1,0 +1,171 @@
+# Builds the ANARI native bundle for macOS arm64 (Apple silicon) and publishes it as a GitHub release.
+#
+# Started by hand (Actions tab, "Release macOS", "Run workflow") with a version string. Creates the
+# tag macos/<version> on the commit the workflow runs on, a release holding
+# anari-macos-arm64-<version>.tar.gz, and adds "macos;<version>;<download url>" to releases.log.
+#
+# One job per bundle part, each built on the runner by macos/build.py, then one job merging the
+# parts. A failed part can be rebuilt with "Re-run failed jobs" : the release is created once
+# every job succeeded.
+name: Release macOS
+run-name: Release macos/${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, in the tag macos/<version> and the archive name (letters, digits, '.', '_', '+', '-')
+        required: true
+        type: string
+      build-args:
+        description: Optional build options, space separated NAME=value (for example ANARI_SDK_REF=v0.15.0 MACOS_DEPLOYMENT_TARGET=15.0). Default is JOBS=3. See macos/README.md.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-macos-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  OS: macos
+  VERSION: ${{ inputs.version }}
+  # bundle parts, in merge order : see macos/README.md
+  PARTS: sdk ospray halogen viskores
+  NAME: anari-macos-arm64-${{ inputs.version }}
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      parts: ${{ steps.parts.outputs.parts }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/check-tag
+        with:
+          os: ${{ env.OS }}
+          version: ${{ inputs.version }}
+
+      - name: List the parts
+        id: parts
+        run: |
+          read -ra parts <<< "${PARTS}"
+          echo "parts=$(printf '%s\n' "${parts[@]}" | jq -R . | jq -cs .)" >> "${GITHUB_OUTPUT}"
+
+  part:
+    name: Part ${{ matrix.part }}
+    needs: check
+    runs-on: macos-15
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.check.outputs.parts) }}
+    env:
+      PART: ${{ matrix.part }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the build tools
+        run: brew install ninja spirv-cross libomp
+
+      - name: Build options
+        env:
+          USER_ARGS: ${{ inputs.build-args }}
+        run: |
+          # defaults first, the options given by the user come later and win
+          echo "JOBS=3" >> "${GITHUB_ENV}"
+          read -ra user <<< "${USER_ARGS}"
+          for a in "${user[@]}"; do
+            if ! [[ "${a}" =~ ^[A-Z0-9_]+=[^[:space:]]*$ ]]; then
+              echo "::error::Invalid build option '${a}', expected NAME=value"
+              exit 1
+            fi
+            echo "${a}" >> "${GITHUB_ENV}"
+          done
+
+      - name: Build the part
+        run: python3 macos/build.py part "${PART}"
+
+      - name: Pack the part
+        run: |
+          # a tar archive keeps the symbolic links, which artifacts do not
+          tar -C macos/dist/parts -cf "part-${PART}.tar" "${PART}"
+          ls -lh "part-${PART}.tar"
+          {
+            echo "### Part ${PART}"
+            echo '```'
+            cat "macos/dist/parts/${PART}/MANIFEST.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.part }}
+          path: part-${{ matrix.part }}.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  bundle:
+    name: Bundle
+    needs: part
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: parts
+          merge-multiple: true
+
+      - name: Assemble the bundle
+        run: |
+          read -ra parts <<< "${PARTS}"
+          mkdir -p macos/dist/parts
+          for part in "${parts[@]}"; do
+            tar -xf "parts/part-${part}.tar" -C macos/dist/parts
+          done
+          BUNDLE_VERSION="${VERSION}" python3 macos/build.py assemble "${NAME}" "${parts[@]}"
+          mkdir -p bundle
+          mv "macos/dist/${NAME}.tar.gz" bundle/
+          cp "macos/dist/${NAME}/MANIFEST.txt" bundle/
+          {
+            echo "### ${NAME}"
+            echo '```'
+            cat "macos/dist/${NAME}/MANIFEST.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: bundle/
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: ${{ runner.temp }}/bundle
+
+      - uses: ./.github/actions/publish
+        with:
+          os: ${{ env.OS }}
+          version: ${{ inputs.version }}
+          archive: ${{ runner.temp }}/bundle/${{ env.NAME }}.tar.gz
+          manifest: ${{ runner.temp }}/bundle/MANIFEST.txt

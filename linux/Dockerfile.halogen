@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+# Bundle part "halogen" : the Halogen device, an ANARI implementation of Google's Filament engine.
+#
+# Built on Ubuntu 24.04 instead of Rocky Linux 8 : Filament's prebuilt libraries and its material
+# compiler (matc) are built on Ubuntu 24.04 with Clang and libc++. This part therefore needs
+# glibc 2.39 or newer at runtime (Ubuntu 24.04, Fedora 40, Debian 13 and newer), and ships libc++.
+
+ARG UBUNTU_IMAGE=ubuntu:24.04
+FROM ${UBUNTU_IMAGE}
+
+ENV LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        clang libc++-dev libc++abi-dev cmake ninja-build git ca-certificates python3 \
+        patchelf file wget xz-utils \
+        libgl-dev libegl-dev libvulkan-dev libx11-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Everything is built with libc++, like Filament, ANARI SDK included : C++ objects cross between them
+ENV CC=clang CXX=clang++ CXXFLAGS=-stdlib=libc++ LDFLAGS=-stdlib=libc++ PART=halogen
+
+COPY scripts/common.sh /scripts/
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# Git branch or tag, empty for the default branch
+ARG HALOGEN_REF=
+COPY scripts/build-halogen.sh /scripts/
+RUN bash /scripts/build-halogen.sh fetch "${HALOGEN_REF}"
+RUN --mount=type=cache,id=anari-bundle-halogen,target=/src/Halogen/build \
+    bash /scripts/build-halogen.sh build "${JOBS}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-halogen.sh bundle

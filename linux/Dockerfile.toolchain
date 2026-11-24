@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+# Toolchain shared by the images building the bundle parts on Rocky Linux 8 : sdk, ospray, visrtx, cycles.
+#
+# Base : Rocky Linux 8 (glibc 2.28) with CUDA, like Blender's builds, so the bundle runs on most
+# Linux distributions released since 2018. The NVIDIA driver is not part of the bundle.
+#
+# Use build-bundle.sh rather than calling docker directly.
+
+ARG CUDA_IMAGE=nvidia/cuda:12.6.3-devel-rockylinux8
+FROM ${CUDA_IMAGE} AS build
+
+ENV LANG=C.UTF-8
+
+# Build tools : GCC 12 toolset (CUDA 12.6 supports up to GCC 13), recent CMake and Ninja,
+# OpenGL / EGL headers for VisGL, X11 / Wayland headers for SDL3, git-lfs for the Blender
+# precompiled libraries, patchelf.
+RUN dnf -y install dnf-plugins-core epel-release \
+ && dnf config-manager --set-enabled powertools \
+ && dnf -y install gcc-toolset-12 git git-lfs python3.11 python3.11-pip \
+        patchelf wget unzip xz bzip2 which file findutils diffutils \
+        mesa-libGL-devel mesa-libEGL-devel libglvnd-devel \
+        libX11-devel libXext-devel libXrandr-devel libXinerama-devel libXcursor-devel libXi-devel \
+        libXfixes-devel libXScrnSaver-devel wayland-devel wayland-protocols-devel libxkbcommon-devel \
+ && dnf clean all \
+ && alternatives --set python3 /usr/bin/python3.11 \
+ && python3 -m pip install --no-cache-dir cmake ninja \
+ && git lfs install --system
+
+ENV PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/cuda/bin:/usr/local/bin:${PATH} \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/opt/rh/gcc-toolset-12/root/usr/lib \
+    CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc \
+    CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++ \
+    CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+
+COPY scripts/common.sh /scripts/

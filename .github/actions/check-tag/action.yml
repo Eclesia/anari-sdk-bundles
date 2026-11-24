@@ -1,0 +1,33 @@
+name: Check the release tag
+description: Checks the version string and that the tag <os>/<version> does not exist yet.
+inputs:
+  os:
+    description: Operating system, first part of the tag (linux, windows, macos)
+    required: true
+  version:
+    description: Version, second part of the tag
+    required: true
+outputs:
+  tag:
+    description: The tag <os>/<version>
+    value: ${{ steps.check.outputs.tag }}
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        OS: ${{ inputs.os }}
+        VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        if ! [[ "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+          echo "::error::Invalid version '${VERSION}' : expected letters, digits, '.', '_', '+' or '-'"
+          exit 1
+        fi
+        tag="${OS}/${VERSION}"
+        if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" > /dev/null 2>&1; then
+          echo "::error::Tag ${tag} already exists"
+          exit 1
+        fi
+        echo "tag=${tag}" >> "${GITHUB_OUTPUT}"

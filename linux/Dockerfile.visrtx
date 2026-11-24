@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# Bundle part "visrtx" : the VisRTX (CUDA / OptiX) and VisGL (OpenGL) devices.
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+ENV PART=visrtx
+
+# Parallel compile jobs, empty for all cores
+ARG JOBS=
+
+# libanari to link with, not shipped : the bundle uses the one of the sdk part
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-core.sh /scripts/
+RUN bash /scripts/build-anari-core.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-visrtx-anari-core,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-core.sh build "${JOBS}"
+
+ARG VISRTX_REF=
+# Oldest GPU compute capability supported by VisRTX, empty for VisRTX default
+ARG VISRTX_MIN_ARCH=
+COPY scripts/build-visrtx.sh /scripts/
+RUN bash /scripts/build-visrtx.sh fetch "${VISRTX_REF}"
+RUN --mount=type=cache,id=anari-bundle-visrtx,target=/src/VisRTX/build \
+    bash /scripts/build-visrtx.sh build "${JOBS}" "${VISRTX_MIN_ARCH}"
+
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-visrtx.sh bundle

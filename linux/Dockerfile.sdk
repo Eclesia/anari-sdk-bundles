@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# Bundle part "sdk" : libanari and the devices of the ANARI SDK (helide, helide_gpu, halcyon, debug, sink).
+# The libanari of this part is the one shipped, the other parts only link to it.
+
+ARG TOOLCHAIN_IMAGE=anari-bundle-toolchain
+FROM ${TOOLCHAIN_IMAGE}
+
+#----------------------------------------------------------------------------------------
+# ISPC, for halcyon
+#----------------------------------------------------------------------------------------
+ARG ISPC_VERSION=1.28.2
+COPY scripts/build-ispc.sh /scripts/
+RUN bash /scripts/build-ispc.sh "${ISPC_VERSION}"
+
+# Parallel compile jobs, empty for all cores. Lower it if the build runs out of memory.
+ARG JOBS=
+
+#----------------------------------------------------------------------------------------
+# glslang and SDL3, for helide_gpu
+#----------------------------------------------------------------------------------------
+ARG GLSLANG_REF=16.6.0
+COPY scripts/build-glslang.sh /scripts/
+RUN bash /scripts/build-glslang.sh fetch "${GLSLANG_REF}"
+RUN --mount=type=cache,id=anari-bundle-glslang,target=/src/glslang/build \
+    bash /scripts/build-glslang.sh build "${JOBS}"
+
+ARG SDL3_REF=release-3.4.20
+COPY scripts/build-sdl3.sh /scripts/
+RUN bash /scripts/build-sdl3.sh fetch "${SDL3_REF}"
+RUN --mount=type=cache,id=anari-bundle-sdl3,target=/src/SDL/build \
+    bash /scripts/build-sdl3.sh build "${JOBS}"
+
+#----------------------------------------------------------------------------------------
+# ANARI SDK
+#----------------------------------------------------------------------------------------
+# Git branch or tag, empty for the default branch (the same for the other *_REF arguments)
+ARG ANARI_SDK_REF=
+COPY scripts/build-anari-sdk.sh /scripts/
+RUN bash /scripts/build-anari-sdk.sh fetch "${ANARI_SDK_REF}"
+RUN --mount=type=cache,id=anari-bundle-sdk,target=/src/ANARI-SDK/build \
+    bash /scripts/build-anari-sdk.sh build "${JOBS}"
+
+#----------------------------------------------------------------------------------------
+# Bundle part, in /bundle/sdk
+#----------------------------------------------------------------------------------------
+ENV PART=sdk
+COPY scripts/collect-part.sh /scripts/
+RUN bash /scripts/build-anari-sdk.sh bundle

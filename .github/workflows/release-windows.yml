@@ -1,0 +1,202 @@
+# Builds the ANARI native bundle for Windows x86_64 and publishes it as a GitHub release.
+#
+# Started by hand (Actions tab, "Release Windows", "Run workflow") with a version string. Creates
+# the tag windows/<version> on the commit the workflow runs on, a release holding
+# anari-windows-x86_64-<version>.zip, and adds "windows;<version>;<download url>" to releases.log.
+#
+# One job per bundle part, each built on the runner by windows/build.py with Visual Studio 2022,
+# then one job merging the parts. A failed part can be rebuilt with "Re-run failed jobs" : the
+# release is created once every job succeeded.
+name: Release Windows
+run-name: Release windows/${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, in the tag windows/<version> and the archive name (letters, digits, '.', '_', '+', '-')
+        required: true
+        type: string
+      build-args:
+        description: Optional build options, space separated NAME=value (for example ANARI_SDK_REF=v0.15.0). Default is JOBS=3. See windows/README.md.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-windows-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  OS: windows
+  VERSION: ${{ inputs.version }}
+  # bundle parts, in merge order : see windows/README.md
+  PARTS: sdk ospray visrtx halogen
+  NAME: anari-windows-x86_64-${{ inputs.version }}
+
+jobs:
+  check:
+    name: Check version
+    runs-on: ubuntu-24.04
+    outputs:
+      parts: ${{ steps.parts.outputs.parts }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: ./.github/actions/check-tag
+        with:
+          os: ${{ env.OS }}
+          version: ${{ inputs.version }}
+
+      - name: List the parts
+        id: parts
+        run: |
+          read -ra parts <<< "${PARTS}"
+          echo "parts=$(printf '%s\n' "${parts[@]}" | jq -R . | jq -cs .)" >> "${GITHUB_OUTPUT}"
+
+  part:
+    name: Part ${{ matrix.part }}
+    needs: check
+    runs-on: windows-2022
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.check.outputs.parts) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      PART: ${{ matrix.part }}
+    steps:
+      - name: Allow long paths in git
+        run: git config --global core.longpaths true
+
+      - uses: actions/checkout@v5
+
+      - name: Set up the Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # the installer of VisRTX's own continuous integration (NVIDIA redistributable archives)
+      - name: Install the CUDA toolkit
+        if: matrix.part == 'visrtx'
+        uses: NVIDIA/VisRTX/.github/actions/setup-cuda@aba2b82903ce560931f72a44083520e9ba6b0190
+        with:
+          cuda-version: 12.4.1
+
+      - name: Build options
+        env:
+          USER_ARGS: ${{ inputs.build-args }}
+        run: |
+          # defaults first, the options given by the user come later and win
+          echo "JOBS=3" >> "${GITHUB_ENV}"
+          read -ra user <<< "${USER_ARGS}"
+          for a in "${user[@]}"; do
+            if ! [[ "${a}" =~ ^[A-Z0-9_]+=[^[:space:]]*$ ]]; then
+              echo "::error::Invalid build option '${a}', expected NAME=value"
+              exit 1
+            fi
+            echo "${a}" >> "${GITHUB_ENV}"
+          done
+
+      # PowerShell rather than Git Bash, whose link command would hide the one of Visual Studio
+      - name: Build the part
+        shell: pwsh
+        run: python windows/build.py part $env:PART
+
+      - name: Pack the part
+        run: |
+          tar -C windows/dist/parts -cf "part-${PART}.tar" "${PART}"
+          ls -lh "part-${PART}.tar"
+          {
+            echo "### Part ${PART}"
+            echo '```'
+            cat "windows/dist/parts/${PART}/MANIFEST.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.part }}
+          path: part-${{ matrix.part }}.tar
+          retention-days: 7
+          if-no-files-found: error
+
+  bundle:
+    name: Bundle
+    needs: part
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      # dumpbin, for the dependency check
+      - name: Set up the Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: part-*
+          path: parts
+          merge-multiple: true
+
+      - name: Extract the parts
+        run: |
+          read -ra parts <<< "${PARTS}"
+          mkdir -p windows/dist/parts
+          for part in "${parts[@]}"; do
+            tar -xf "parts/part-${part}.tar" -C windows/dist/parts
+          done
+
+      - name: Assemble the bundle
+        shell: pwsh
+        run: |
+          $env:BUNDLE_VERSION = $env:VERSION
+          $parts = $env:PARTS -split ' '
+          python windows/build.py assemble $env:NAME @parts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect the archive
+        run: |
+          mkdir -p bundle
+          mv "windows/dist/${NAME}.zip" bundle/
+          cp "windows/dist/${NAME}/MANIFEST.txt" bundle/
+          {
+            echo "### ${NAME}"
+            echo '```'
+            cat "windows/dist/${NAME}/MANIFEST.txt"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: bundle/
+          compression-level: 0
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: bundle
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: ${{ runner.temp }}/bundle
+
+      - uses: ./.github/actions/publish
+        with:
+          os: ${{ env.OS }}
+          version: ${{ inputs.version }}
+          archive: ${{ runner.temp }}/bundle/${{ env.NAME }}.zip
+          manifest: ${{ runner.temp }}/bundle/MANIFEST.txt
